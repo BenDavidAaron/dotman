@@ -56,6 +56,7 @@ and push with normal Git commands.
 | `dotman add PATH [--name NAME]` | Copy, link, and commit a path. |
 | `dotman remove PATH` | Restore, unmanage, and commit a path. |
 | `dotman list` | Show each managed path and its stored copy. |
+| `dotman open` | Start an interactive shell in the dotman repository. |
 | `dotman restore` | Recreate missing registered symbolic links. |
 | `dotman status` | Report registered paths, healthy links, and clean Git entries. |
 
@@ -70,6 +71,17 @@ and push with normal Git commands.
 
 Each registry entry maps a destination below your home directory to a path
 below `files/`.
+
+## Edit the repository
+
+Run `dotman open` to start a shell in `~/.config/dotman`.
+
+```sh
+dotman open
+```
+
+Edit managed files and use Git commands in that shell. Run `exit` when you
+finish. Your original shell remains in its original directory.
 
 ## Safety behavior
 

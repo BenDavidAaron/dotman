@@ -37,6 +37,7 @@ enum Commands {
         path: PathBuf,
     },
     List,
+    Open,
     Restore,
     Status,
 }
@@ -70,6 +71,7 @@ fn main() -> Result<()> {
         Commands::Add { path, name } => add(path, name, &command),
         Commands::Remove { path } => remove(path, &command),
         Commands::List => list(),
+        Commands::Open => open(),
         Commands::Restore => restore(),
         Commands::Status => status(),
     }
@@ -142,6 +144,7 @@ those managed copies.
 - `dotman init` creates this repository.
 - `dotman add PATH` imports a file or directory.
 - `dotman list` shows registered mappings.
+- `dotman open` starts a shell in this repository.
 - `dotman status` reports link and Git status.
 - `dotman restore` recreates registered symbolic links.
 - `dotman remove PATH` restores a regular copy and removes management.
@@ -296,6 +299,21 @@ fn list_entries(store: &Store) -> Result<Vec<String>> {
             )
         })
         .collect())
+}
+
+fn open() -> Result<()> {
+    let store = require_store()?;
+    let shell = env::var_os("SHELL").context("SHELL is not set")?;
+    println!("Starting a shell in {}", store.root.display());
+    println!("Run exit to return to your original directory.");
+    let status = Command::new(shell)
+        .current_dir(&store.root)
+        .status()
+        .context("failed to start shell")?;
+    if !status.success() {
+        bail!("shell exited with status {status}");
+    }
+    Ok(())
 }
 
 fn restore() -> Result<()> {
@@ -629,6 +647,19 @@ mod tests {
     #[test]
     fn add_rejects_a_second_path() {
         let result = Cli::try_parse_from(["dotman", "add", ".zshrc", ".zshrc"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_accepts_no_arguments() -> Result<()> {
+        let cli = Cli::try_parse_from(["dotman", "open"])?;
+        assert!(matches!(cli.command, Commands::Open));
+        Ok(())
+    }
+
+    #[test]
+    fn open_rejects_arguments() {
+        let result = Cli::try_parse_from(["dotman", "open", "extra"]);
         assert!(result.is_err());
     }
 
