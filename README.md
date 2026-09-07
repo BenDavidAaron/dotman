@@ -113,3 +113,30 @@ Run formatting and tests:
 cargo fmt --check
 cargo test
 ```
+
+Install Prek and its Git hook:
+
+```sh
+brew install prek
+prek install
+```
+
+Run all hooks before you commit:
+
+```sh
+prek run --all-files
+```
+
+Prek runs Cargo formatting, Clippy, and Cargo checks before each commit.
+
+## Releases
+
+Push a Git tag to start the release workflow:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow runs unit tests and creates a GitHub release after all builds pass.
+It publishes macOS ARM64, Linux ARM64, and Linux AMD64 archives.
