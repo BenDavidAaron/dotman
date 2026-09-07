@@ -63,11 +63,12 @@ struct Store {
 }
 
 fn main() -> Result<()> {
+    let command = invocation_message();
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => init(),
-        Commands::Add { path, name } => add(path, name),
-        Commands::Remove { path } => remove(path),
+        Commands::Add { path, name } => add(path, name, &command),
+        Commands::Remove { path } => remove(path, &command),
         Commands::List => list(),
         Commands::Restore => restore(),
         Commands::Status => status(),
@@ -141,8 +142,8 @@ those managed copies.
 - `dotman restore` recreates registered symbolic links.
 - `dotman remove PATH` restores a regular copy and removes management.
 
-Dotman runs `git init` during setup. Run Git add, commit, remote, push, and
-other Git commands yourself.
+Dotman runs `git init` during setup. It commits changes from `add` and
+`remove`. Add a remote and push with your preferred Git commands.
 "
 }
 
@@ -181,7 +182,7 @@ fn write_registry(store: &Store, registry: &Registry) -> Result<()> {
     fs::write(&store.registry_path, text).context("cannot write index.yaml")
 }
 
-fn add(path: PathBuf, name: Option<String>) -> Result<()> {
+fn add(path: PathBuf, name: Option<String>, command: &str) -> Result<()> {
     let store = require_store()?;
     let mut registry = load(&store)?;
     let destination_abs = absolute(&path)?;
@@ -224,17 +225,14 @@ fn add(path: PathBuf, name: Option<String>) -> Result<()> {
     if let Err(error) = write_registry(&store, &registry) {
         bail!("file linked, but registry update failed: {error}");
     }
+    git_commit(&store, command, &[INDEX, &managed_rel])
+        .context("path is managed, but Git commit failed")?;
     println!("Managed {destination_rel}");
-    println!(
-        "Next: cd {} && git add index.yaml '{}' && git commit -m 'Add {}'",
-        store.root.display(),
-        managed_rel,
-        destination_rel
-    );
+    println!("Committed {command}");
     Ok(())
 }
 
-fn remove(path: PathBuf) -> Result<()> {
+fn remove(path: PathBuf, command: &str) -> Result<()> {
     let store = require_store()?;
     let mut registry = load(&store)?;
     let destination = relative_destination(&store, &path)?;
@@ -254,13 +252,10 @@ fn remove(path: PathBuf) -> Result<()> {
     remove_tree(&target)?;
     registry.entries.remove(position);
     write_registry(&store, &registry)?;
+    git_commit(&store, command, &[INDEX, &entry.source])
+        .context("path is unmanaged, but Git commit failed")?;
     println!("Unmanaged {destination}");
-    println!(
-        "Next: cd {} && git add -A -- index.yaml '{}' && git commit -m 'Remove {}'",
-        store.root.display(),
-        entry.source,
-        destination
-    );
+    println!("Committed {command}");
     Ok(())
 }
 
@@ -340,6 +335,22 @@ fn require_store() -> Result<Store> {
         bail!("dotman is not initialized; run dotman init");
     }
     Ok(store)
+}
+
+fn invocation_message() -> String {
+    let arguments = env::args_os()
+        .skip(1)
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    format_invocation(&arguments)
+}
+
+fn format_invocation(arguments: &[String]) -> String {
+    if arguments.is_empty() {
+        "dotman".to_string()
+    } else {
+        format!("dotman {}", arguments.join(" "))
+    }
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
@@ -456,6 +467,41 @@ fn remove_tree(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn git_commit(store: &Store, message: &str, paths: &[&str]) -> Result<()> {
+    let mut add = Command::new("git");
+    add.arg("-C")
+        .arg(&store.root)
+        .arg("add")
+        .arg("-A")
+        .arg("--");
+    add.args(paths);
+    let add_output = add.output().context("failed to run git add")?;
+    if !add_output.status.success() {
+        bail!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add_output.stderr).trim()
+        );
+    }
+
+    let mut commit = Command::new("git");
+    commit
+        .arg("-C")
+        .arg(&store.root)
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .arg("--");
+    commit.args(paths);
+    let commit_output = commit.output().context("failed to run git commit")?;
+    if !commit_output.status.success() {
+        bail!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit_output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn git_committed_clean(root: &Path, relative: &str) -> Result<bool> {
     let head = Command::new("git")
         .args([
@@ -486,6 +532,7 @@ fn git_committed_clean(root: &Path, relative: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn add_accepts_one_path() {
@@ -503,5 +550,78 @@ mod tests {
     fn add_rejects_a_second_path() {
         let result = Cli::try_parse_from(["dotman", "add", ".zshrc", ".zshrc"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn commit_message_uses_the_dotman_command() {
+        let arguments = vec!["add".to_string(), "~/.zshrc".to_string()];
+        assert_eq!(format_invocation(&arguments), "dotman add ~/.zshrc");
+    }
+
+    #[test]
+    fn git_commit_records_additions_and_deletions() -> Result<()> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = env::temp_dir().join(format!("dotman-test-{}-{unique}", std::process::id()));
+        fs::create_dir_all(root.join(FILES))?;
+        let initialize = Command::new("git").arg("init").arg(&root).status()?;
+        if !initialize.success() {
+            bail!("git init failed during test");
+        }
+        let configured_name = Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "config",
+                "user.name",
+                "Dotman Test",
+            ])
+            .status()?;
+        if !configured_name.success() {
+            bail!("git user.name setup failed during test");
+        }
+        let configured_email = Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "config",
+                "user.email",
+                "dotman@example.test",
+            ])
+            .status()?;
+        if !configured_email.success() {
+            bail!("git user.email setup failed during test");
+        }
+
+        fs::write(root.join(INDEX), "version: 1\nentries: []\n")?;
+        fs::write(root.join(FILES).join("zshrc"), "setopt autocd\n")?;
+        let store = Store {
+            home: root.join("home"),
+            registry_path: root.join(INDEX),
+            root: root.clone(),
+        };
+        let result = git_commit(&store, "dotman add ~/.zshrc", &[INDEX, "files/zshrc"]);
+        let output = Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "log", "-1", "--format=%s"])
+            .output()?;
+        result?;
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim(),
+            "dotman add ~/.zshrc"
+        );
+
+        fs::remove_file(root.join(FILES).join("zshrc"))?;
+        fs::write(root.join(INDEX), "version: 1\nentries: []\n")?;
+        git_commit(&store, "dotman remove ~/.zshrc", &[INDEX, "files/zshrc"])?;
+        let output = Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "log", "-1", "--format=%s"])
+            .output()?;
+        let _ = fs::remove_dir_all(&root);
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim(),
+            "dotman remove ~/.zshrc"
+        );
+        Ok(())
     }
 }

@@ -45,23 +45,16 @@ Add a directory from your home directory:
 dotman add ~/.config/nvim --name neovim
 ```
 
-Commit the managed files:
-
-```sh
-cd ~/.config/dotman
-git add index.yaml files
-git commit -m 'Add dotfiles'
-```
-
-Add a remote and push with normal Git commands.
+`dotman add` commits the registry and managed path automatically. Add a remote
+and push with normal Git commands.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | `dotman init` | Create `~/.config/dotman` and initialize its Git repository. |
-| `dotman add PATH [--name NAME]` | Copy a path into the repository and link the original path. |
-| `dotman remove PATH` | Restore a regular copy and stop managing the path. |
+| `dotman add PATH [--name NAME]` | Copy, link, and commit a path. |
+| `dotman remove PATH` | Restore, unmanage, and commit a path. |
 | `dotman list` | Show each managed path and its stored copy. |
 | `dotman restore` | Recreate missing registered symbolic links. |
 | `dotman status` | Report registered paths, healthy links, and clean Git entries. |
@@ -89,8 +82,8 @@ reports each conflict and returns an error.
 `remove` requires the expected `dotman` symbolic link. It restores a regular
 copy before it removes the managed copy.
 
-Dotman does not commit, push, or configure Git remotes. Review and commit the
-repository changes yourself.
+Dotman commits `add` and `remove` changes. It uses the complete `dotman`
+command as the commit message. It does not push or configure Git remotes.
 
 Empty directories are not supported. Dotman copies file contents for symbolic
 links inside managed directories.
