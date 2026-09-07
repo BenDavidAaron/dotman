@@ -29,8 +29,7 @@ struct Cli {
 enum Commands {
     Init,
     Add {
-        source: PathBuf,
-        destination: PathBuf,
+        path: PathBuf,
         #[arg(long)]
         name: Option<String>,
     },
@@ -67,11 +66,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => init(),
-        Commands::Add {
-            source,
-            destination,
-            name,
-        } => add(source, destination, name),
+        Commands::Add { path, name } => add(path, name),
         Commands::Remove { path } => remove(path),
         Commands::List => list(),
         Commands::Restore => restore(),
@@ -140,7 +135,7 @@ those managed copies.
 ## Basic commands
 
 - `dotman init` creates this repository.
-- `dotman add SOURCE DESTINATION` imports a file or directory.
+- `dotman add PATH` imports a file or directory.
 - `dotman list` shows registered mappings.
 - `dotman status` reports link and Git status.
 - `dotman restore` recreates registered symbolic links.
@@ -186,22 +181,16 @@ fn write_registry(store: &Store, registry: &Registry) -> Result<()> {
     fs::write(&store.registry_path, text).context("cannot write index.yaml")
 }
 
-fn add(source: PathBuf, destination: PathBuf, name: Option<String>) -> Result<()> {
+fn add(path: PathBuf, name: Option<String>) -> Result<()> {
     let store = require_store()?;
     let mut registry = load(&store)?;
-    let source_abs = absolute(&source)?;
-    let destination_abs = absolute(&destination)?;
-    let source_meta = fs::symlink_metadata(&source_abs).context("source does not exist")?;
+    let destination_abs = absolute(&path)?;
+    let source_meta = fs::symlink_metadata(&destination_abs).context("path does not exist")?;
     if source_meta.file_type().is_symlink() {
-        bail!("source root cannot be a symlink");
+        bail!("path root cannot be a symlink");
     }
-    if !source_abs.starts_with(&store.home) || !destination_abs.starts_with(&store.home) {
-        bail!("source and destination must be below HOME");
-    }
-    if fs::canonicalize(&source_abs).context("cannot resolve source")?
-        != fs::canonicalize(&destination_abs).context("cannot resolve destination")?
-    {
-        bail!("source and destination must name the same path");
+    if !destination_abs.starts_with(&store.home) {
+        bail!("path must be below HOME");
     }
     let destination_rel = destination_abs
         .strip_prefix(&store.home)?
@@ -219,9 +208,9 @@ fn add(source: PathBuf, destination: PathBuf, name: Option<String>) -> Result<()
     if managed.exists() {
         bail!("managed path already exists: {}", managed.display());
     }
-    copy_tree(&source_abs, &managed, &mut HashSet::new())?;
+    copy_tree(&destination_abs, &managed, &mut HashSet::new())?;
     if let Err(error) =
-        remove_tree(&source_abs).and_then(|_| replace_with_link(&source_abs, &managed))
+        remove_tree(&destination_abs).and_then(|_| replace_with_link(&destination_abs, &managed))
     {
         let _ = fs::remove_dir_all(&managed);
         let _ = fs::remove_file(&managed);
@@ -492,4 +481,27 @@ fn git_committed_clean(root: &Path, relative: &str) -> Result<bool> {
         ])
         .output()?;
     Ok(output.status.success() && output.stdout.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_accepts_one_path() {
+        let cli = Cli::try_parse_from(["dotman", "add", ".zshrc"]).unwrap();
+        match cli.command {
+            Commands::Add { path, name } => {
+                assert_eq!(path, PathBuf::from(".zshrc"));
+                assert_eq!(name, None);
+            }
+            _ => panic!("expected add command"),
+        }
+    }
+
+    #[test]
+    fn add_rejects_a_second_path() {
+        let result = Cli::try_parse_from(["dotman", "add", ".zshrc", ".zshrc"]);
+        assert!(result.is_err());
+    }
 }
