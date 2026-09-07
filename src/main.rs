@@ -89,6 +89,10 @@ fn store() -> Result<Store> {
 
 fn init() -> Result<()> {
     let store = store()?;
+    init_store(&store)
+}
+
+fn init_store(store: &Store) -> Result<()> {
     if store.root.exists() {
         bail!(
             "{} already exists; init will not change it",
@@ -97,7 +101,7 @@ fn init() -> Result<()> {
     }
     fs::create_dir_all(store.root.join(FILES))?;
     write_registry(
-        &store,
+        store,
         &Registry {
             version: 1,
             entries: Vec::new(),
@@ -184,7 +188,11 @@ fn write_registry(store: &Store, registry: &Registry) -> Result<()> {
 
 fn add(path: PathBuf, name: Option<String>, command: &str) -> Result<()> {
     let store = require_store()?;
-    let mut registry = load(&store)?;
+    add_to_store(&store, path, name, command)
+}
+
+fn add_to_store(store: &Store, path: PathBuf, name: Option<String>, command: &str) -> Result<()> {
+    let mut registry = load(store)?;
     let destination_abs = absolute(&path)?;
     let source_meta = fs::symlink_metadata(&destination_abs).context("path does not exist")?;
     if source_meta.file_type().is_symlink() {
@@ -222,10 +230,10 @@ fn add(path: PathBuf, name: Option<String>, command: &str) -> Result<()> {
         source: managed_rel.clone(),
         destination: destination_rel.clone(),
     });
-    if let Err(error) = write_registry(&store, &registry) {
+    if let Err(error) = write_registry(store, &registry) {
         bail!("file linked, but registry update failed: {error}");
     }
-    git_commit(&store, command, &[INDEX, &managed_rel])
+    git_commit(store, command, &[INDEX, &managed_rel])
         .context("path is managed, but Git commit failed")?;
     println!("Managed {destination_rel}");
     println!("Committed {command}");
@@ -234,8 +242,12 @@ fn add(path: PathBuf, name: Option<String>, command: &str) -> Result<()> {
 
 fn remove(path: PathBuf, command: &str) -> Result<()> {
     let store = require_store()?;
-    let mut registry = load(&store)?;
-    let destination = relative_destination(&store, &path)?;
+    remove_from_store(&store, path, command)
+}
+
+fn remove_from_store(store: &Store, path: PathBuf, command: &str) -> Result<()> {
+    let mut registry = load(store)?;
+    let destination = relative_destination(store, &path)?;
     let position = registry
         .entries
         .iter()
@@ -251,8 +263,8 @@ fn remove(path: PathBuf, command: &str) -> Result<()> {
     fs::rename(&temp, &install).context("cannot restore regular path")?;
     remove_tree(&target)?;
     registry.entries.remove(position);
-    write_registry(&store, &registry)?;
-    git_commit(&store, command, &[INDEX, &entry.source])
+    write_registry(store, &registry)?;
+    git_commit(store, command, &[INDEX, &entry.source])
         .context("path is unmanaged, but Git commit failed")?;
     println!("Unmanaged {destination}");
     println!("Committed {command}");
@@ -261,24 +273,38 @@ fn remove(path: PathBuf, command: &str) -> Result<()> {
 
 fn list() -> Result<()> {
     let store = require_store()?;
-    for entry in load(&store)?.entries {
-        println!(
-            "{}{} -> {}",
-            entry
-                .name
-                .as_deref()
-                .map(|n| format!("[{n}] "))
-                .unwrap_or_default(),
-            entry.destination,
-            entry.source
-        );
+    for line in list_entries(&store)? {
+        println!("{line}");
     }
     Ok(())
 }
 
+fn list_entries(store: &Store) -> Result<Vec<String>> {
+    Ok(load(store)?
+        .entries
+        .into_iter()
+        .map(|entry| {
+            format!(
+                "{}{} -> {}",
+                entry
+                    .name
+                    .as_deref()
+                    .map(|n| format!("[{n}] "))
+                    .unwrap_or_default(),
+                entry.destination,
+                entry.source
+            )
+        })
+        .collect())
+}
+
 fn restore() -> Result<()> {
     let store = require_store()?;
-    let registry = load(&store)?;
+    restore_from_store(&store)
+}
+
+fn restore_from_store(store: &Store) -> Result<()> {
+    let registry = load(store)?;
     let mut conflicts = 0;
     for entry in registry.entries {
         let target = store.root.join(&entry.source);
@@ -310,7 +336,15 @@ fn restore() -> Result<()> {
 
 fn status() -> Result<()> {
     let store = require_store()?;
-    let registry = load(&store)?;
+    let (registered, links, committed_clean) = status_counts(&store)?;
+    println!("registered: {registered}");
+    println!("healthy symlinks: {links}");
+    println!("committed and clean: {committed_clean}");
+    Ok(())
+}
+
+fn status_counts(store: &Store) -> Result<(usize, usize, usize)> {
+    let registry = load(store)?;
     let mut links = 0;
     let mut committed_clean = 0;
     for entry in &registry.entries {
@@ -323,10 +357,7 @@ fn status() -> Result<()> {
             committed_clean += 1;
         }
     }
-    println!("registered: {}", registry.entries.len());
-    println!("healthy symlinks: {links}");
-    println!("committed and clean: {committed_clean}");
-    Ok(())
+    Ok((registry.entries.len(), links, committed_clean))
 }
 
 fn require_store() -> Result<Store> {
@@ -534,6 +565,55 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    struct TestStore {
+        base: PathBuf,
+        store: Store,
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn temporary_store() -> Result<TestStore> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let base = env::temp_dir().join(format!("dotman-test-{}-{unique}", std::process::id()));
+        let home = base.join("home");
+        let root = home.join(".config/dotman");
+        Ok(TestStore {
+            store: Store {
+                registry_path: root.join(INDEX),
+                home,
+                root,
+            },
+            base,
+        })
+    }
+
+    fn configure_git(root: &Path) -> Result<()> {
+        for (key, value) in [
+            ("user.name", "Dotman Test"),
+            ("user.email", "dotman@example.test"),
+        ] {
+            let status = Command::new("git")
+                .args(["-C", &root.to_string_lossy(), "config", key, value])
+                .status()?;
+            if !status.success() {
+                bail!("Git test configuration failed");
+            }
+        }
+        Ok(())
+    }
+
+    fn initialized_store() -> Result<TestStore> {
+        let context = temporary_store()?;
+        init_store(&context.store)?;
+        configure_git(&context.store.root)?;
+        git_commit(&context.store, "initial", &[INDEX, README])?;
+        Ok(context)
+    }
+
     #[test]
     fn add_accepts_one_path() {
         let cli = Cli::try_parse_from(["dotman", "add", ".zshrc"]).unwrap();
@@ -621,6 +701,184 @@ mod tests {
         assert_eq!(
             String::from_utf8(output.stdout)?.trim(),
             "dotman remove ~/.zshrc"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn init_creates_a_repository_and_rejects_existing_store() -> Result<()> {
+        let context = temporary_store()?;
+        init_store(&context.store)?;
+        assert!(context.store.root.join(FILES).is_dir());
+        assert!(context.store.registry_path.is_file());
+        assert!(context.store.root.join(".git").is_dir());
+        assert!(init_store(&context.store).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn add_remove_list_restore_and_status_work_together() -> Result<()> {
+        let context = initialized_store()?;
+        let path = context.store.home.join(".zshrc");
+        fs::write(&path, "setopt autocd\n")?;
+        add_to_store(
+            &context.store,
+            path.clone(),
+            Some("shell".to_string()),
+            "dotman add ~/.zshrc",
+        )?;
+        assert!(path.is_symlink());
+        assert_eq!(
+            fs::read_to_string(context.store.root.join("files/.zshrc"))?,
+            "setopt autocd\n"
+        );
+        assert_eq!(
+            list_entries(&context.store)?,
+            vec!["[shell] .zshrc -> files/.zshrc"]
+        );
+        assert_eq!(status_counts(&context.store)?, (1, 1, 1));
+        fs::remove_file(&path)?;
+        restore_from_store(&context.store)?;
+        assert!(path.is_symlink());
+        remove_from_store(&context.store, path.clone(), "dotman remove ~/.zshrc")?;
+        assert!(!path.is_symlink());
+        assert_eq!(fs::read_to_string(&path)?, "setopt autocd\n");
+        assert!(load(&context.store)?.entries.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn add_copies_nested_directories() -> Result<()> {
+        let context = initialized_store()?;
+        let source = context.store.home.join(".config/example");
+        fs::create_dir_all(source.join("nested/deeper"))?;
+        fs::write(source.join("settings.toml"), "theme = 'dark'\n")?;
+        fs::write(source.join("nested/deeper/config.txt"), "enabled\n")?;
+
+        add_to_store(
+            &context.store,
+            source.clone(),
+            None,
+            "dotman add ~/.config/example",
+        )?;
+
+        let managed = context.store.root.join("files/.config/example");
+        assert!(source.is_symlink());
+        assert_eq!(
+            fs::read_to_string(managed.join("settings.toml"))?,
+            "theme = 'dark'\n"
+        );
+        assert_eq!(
+            fs::read_to_string(managed.join("nested/deeper/config.txt"))?,
+            "enabled\n"
+        );
+        assert_eq!(status_counts(&context.store)?, (1, 1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn validation_conflicts_and_git_failures_report_errors() -> Result<()> {
+        let context = initialized_store()?;
+        let path = context.store.home.join(".zshrc");
+        fs::write(&path, "content\n")?;
+        add_to_store(&context.store, path.clone(), None, "dotman add ~/.zshrc")?;
+        assert!(add_to_store(&context.store, path.clone(), None, "dotman add ~/.zshrc").is_err());
+        fs::remove_file(&path)?;
+        fs::write(&path, "conflict\n")?;
+        assert!(restore_from_store(&context.store).is_err());
+        fs::remove_file(&path)?;
+        symlink(context.store.root.join("files/.zshrc"), &path)?;
+        assert!(remove_from_store(&context.store, path, "dotman remove ~/.zshrc").is_ok());
+
+        fs::write(&context.store.registry_path, "version: 2\nentries: []\n")?;
+        assert!(load(&context.store).is_err());
+        fs::write(
+            &context.store.registry_path,
+            "version: 1\nentries:\n  - source: files/../bad\n    destination: .bad\n",
+        )?;
+        assert!(load(&context.store).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_and_tree_validation_reject_unsafe_inputs() -> Result<()> {
+        let context = initialized_store()?;
+        for registry in [
+            "version: 1\nentries:\n  - source: other/file\n    destination: .bad\n",
+            "version: 1\nentries:\n  - source: files/a\n    destination: .a\n  - source: files/b\n    destination: .a\n",
+            "version: 1\nentries:\n  - name: same\n    source: files/a\n    destination: .a\n  - name: same\n    source: files/b\n    destination: .b\n",
+        ] {
+            fs::write(&context.store.registry_path, registry)?;
+            assert!(load(&context.store).is_err());
+        }
+        let empty = context.store.home.join("empty");
+        fs::create_dir_all(&empty)?;
+        assert!(
+            copy_tree(
+                &empty,
+                &context.store.root.join("files/empty"),
+                &mut HashSet::new()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_rejects_links_outside_paths_and_missing_git_identity() -> Result<()> {
+        let context = initialized_store()?;
+        let outside = context.base.join("outside");
+        fs::write(&outside, "content\n")?;
+        assert!(add_to_store(&context.store, outside, None, "dotman add outside").is_err());
+        let link = context.store.home.join("link");
+        symlink(context.store.root.join(README), &link)?;
+        assert!(add_to_store(&context.store, link, None, "dotman add ~/link").is_err());
+
+        let unconfigured = temporary_store()?;
+        init_store(&unconfigured.store)?;
+        for key in ["user.name", "user.email"] {
+            let status = Command::new("git")
+                .args([
+                    "-C",
+                    &unconfigured.store.root.to_string_lossy(),
+                    "config",
+                    key,
+                    "",
+                ])
+                .status()?;
+            assert!(status.success());
+        }
+        let path = unconfigured.store.home.join(".zshrc");
+        fs::write(&path, "content\n")?;
+        assert!(add_to_store(&unconfigured.store, path, None, "dotman add ~/.zshrc").is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_cyclic_and_broken_links() -> Result<()> {
+        let context = initialized_store()?;
+        let cycle = context.store.home.join("cycle");
+        fs::create_dir_all(&cycle)?;
+        symlink(&cycle, cycle.join("loop"))?;
+        assert!(
+            copy_tree(
+                &cycle,
+                &context.store.root.join("files/cycle"),
+                &mut HashSet::new()
+            )
+            .is_err()
+        );
+        let broken = context.store.home.join("broken");
+        symlink(context.store.home.join("missing"), &broken)?;
+        assert!(
+            copy_tree(
+                &broken,
+                &context.store.root.join("files/broken"),
+                &mut HashSet::new()
+            )
+            .is_err()
         );
         Ok(())
     }
